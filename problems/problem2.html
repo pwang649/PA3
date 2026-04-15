@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>CPSC 487/587</title>
+    <script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/lil-gui@0.19.1/dist/lil-gui.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mathjs/10.3.0/math.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/quaternion@1.5.1/quaternion.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/numeric@1.2.6/numeric-1.2.6.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/stats.js@0.17.0/build/stats.min.js"></script>
+    <script type="importmap">
+        {
+            "imports": {
+              "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+              "three/": "https://unpkg.com/three@0.160.0/"
+            }
+        }
+    </script>
+</head>
+<body>
+<script type="module">
+    import { ThreeEngine, get_default_lil_gui, refresh_displays } from "../js/utils/utils_three.js";
+    import {
+        add_matrix_matrix,
+        mul_matrix_scalar,
+        cross_product,
+        dot_product,
+        frobenius_norm_matrix,
+    } from "../js/utils/utils_math.js";
+
+    // todo: create a visualization that demonstrates your knowledge of quaternions.  This is intentionally
+    // todo: open-ended.  Be as creative as you want, or feel free to recreate any of the visualizations
+    // todo: found in Section 3.3.
+
+    /** Column 3-vector → [x,y,z] for drawing helpers. */
+    function xyz(col) {
+        return [col[0][0], col[1][0], col[2][0]];
+    }
+
+    /** Hamilton product p ⊗ q with p,q as [w,x,y,z]. */
+    function quat_mul(p, q) {
+        const pw = p[0],
+            px = p[1],
+            py = p[2],
+            pz = p[3];
+        const qw = q[0],
+            qx = q[1],
+            qy = q[2],
+            qz = q[3];
+        return [
+            pw * qw - px * qx - py * qy - pz * qz,
+            pw * qx + px * qw + py * qz - pz * qy,
+            pw * qy - px * qz + py * qw + pz * qx,
+            pw * qz + px * qy - py * qx + pz * qw,
+        ];
+    }
+
+    function quat_conj(q) {
+        return [q[0], -q[1], -q[2], -q[3]];
+    }
+
+    /**
+     * R³ hodograph-style picture: vector part as arrow from origin; vertical segment encodes |s|;
+     * sphere at (i,j,k+s) marks the full quaternion in R⁴ projected with scalar on the k-axis offset.
+     */
+    function draw_quaternion_anchor(engine, q, vecColor, markerColor) {
+        const s = q[0];
+        const i = q[1],
+            j = q[2],
+            k = q[3];
+        const pad = 0.12;
+        const span = Math.abs(s) + pad;
+
+        engine.draw_debug_vector([0, 0, 0], [i, j, k], 0.04, undefined, vecColor);
+        engine.draw_debug_line([i, j, k - span], [i, j, k + span], false, 0.014, vecColor, 0.45);
+        engine.draw_debug_sphere([i, j, k + s], 0.075, markerColor, 1, 16);
+
+        for (let h = 0.1; h < span; h += 0.1) {
+            engine.draw_debug_sphere([i, j, k + h], 0.022, 0x444444, 0.55, 6);
+            engine.draw_debug_sphere([i, j, k - h], 0.022, 0x444444, 0.55, 6);
+        }
+    }
+
+    /**
+     * Vector part of p⊗q is Im(p) × Im(q) + Re(q)·Im(p) + Re(p)·Im(q).
+     * Draw the three leg additions in order: cross → + Re(q)·Im(p) → + Re(p)·Im(q).
+     */
+    function draw_imaginary_product_path(engine, p, q, pathColor, pathOpacity) {
+        const rp = p[0],
+            rq = q[0];
+        const im_p = [[p[1]], [p[2]], [p[3]]];
+        const im_q = [[q[1]], [q[2]], [q[3]]];
+        const cr = cross_product(im_p, im_q);
+        const term_rq_vp = mul_matrix_scalar(im_p, rq);
+        const term_rp_vq = mul_matrix_scalar(im_q, rp);
+
+        const a = cr;
+        const b = add_matrix_matrix(term_rq_vp, cr);
+        const c = add_matrix_matrix(b, term_rp_vq);
+
+        const o = [0, 0, 0];
+        engine.draw_debug_vector(o, xyz(a), 0.032, undefined, pathColor, pathOpacity);
+        engine.draw_debug_vector(xyz(a), xyz(b), 0.032, undefined, pathColor, pathOpacity);
+        engine.draw_debug_vector(xyz(b), xyz(c), 0.032, undefined, pathColor, pathOpacity);
+
+        const pq = quat_mul(p, q);
+        draw_quaternion_anchor(engine, pq, 0x1a1a1a, 0xe85d04);
+    }
+
+    const engine = ThreeEngine.new_default_3d();
+
+    const state = {
+        s_p: 1,
+        i_p: 1,
+        j_p: 0,
+        k_p: 0,
+        norm_p: "",
+        s_q: 1,
+        i_q: 0,
+        j_q: 1,
+        k_q: 0,
+        norm_q: "",
+        show_conj: false,
+        pq_components: "",
+        pq_norm: "",
+    };
+
+    const gui = get_default_lil_gui();
+
+    const fP = gui.addFolder("p (coral vector, scalar stem)");
+    fP.add(state, "s_p", -2, 2).name("Re(p)");
+    fP.add(state, "i_p", -2, 2).name("i");
+    fP.add(state, "j_p", -2, 2).name("j");
+    fP.add(state, "k_p", -2, 2).name("k");
+    fP.add(state, "norm_p").name("‖p‖").disable();
+    fP.add(
+        {
+            reset() {
+                state.s_p = 1;
+                state.i_p = 1;
+                state.j_p = 0;
+                state.k_p = 0;
+                refresh_displays(gui);
+            },
+        },
+        "reset",
+    ).name("reset p");
+
+    const fQ = gui.addFolder("q (teal)");
+    fQ.add(state, "s_q", -2, 2).name("Re(q)");
+    fQ.add(state, "i_q", -2, 2).name("i");
+    fQ.add(state, "j_q", -2, 2).name("j");
+    fQ.add(state, "k_q", -2, 2).name("k");
+    fQ.add(state, "norm_q").name("‖q‖").disable();
+    fQ.add(
+        {
+            reset() {
+                state.s_q = 1;
+                state.i_q = 0;
+                state.j_q = 1;
+                state.k_q = 0;
+                refresh_displays(gui);
+            },
+        },
+        "reset",
+    ).name("reset q");
+
+    gui.add(state, "show_conj").name("overlay p*, q*");
+
+    const fOut = gui.addFolder("p ⊗ q");
+    fOut.add(state, "pq_components").name("components").disable();
+    fOut.add(state, "pq_norm").name("‖p⊗q‖").disable();
+
+    engine.animation_loop(function () {
+        const p = [state.s_p, state.i_p, state.j_p, state.k_p];
+        const q = [state.s_q, state.i_q, state.j_q, state.k_q];
+
+        draw_quaternion_anchor(engine, p, 0xc7522a, 0xff9f7a);
+        draw_quaternion_anchor(engine, q, 0x0d9488, 0x5eead4);
+        draw_imaginary_product_path(engine, p, q, 0x4c1d95, 0.28);
+
+        if (state.show_conj) {
+            const pc = quat_conj(p);
+            const qc = quat_conj(q);
+            draw_quaternion_anchor(engine, pc, 0xc7522a, 0xff9f7a);
+            draw_quaternion_anchor(engine, qc, 0x0d9488, 0x5eead4);
+            draw_imaginary_product_path(engine, pc, qc, 0x312e81, 0.2);
+        }
+
+        const pq = quat_mul(p, q);
+        state.norm_p = frobenius_norm_matrix(p).toFixed(4);
+        state.norm_q = frobenius_norm_matrix(q).toFixed(4);
+        state.pq_components = pq.map((v) => v.toFixed(4)).join(", ");
+        state.pq_norm = frobenius_norm_matrix(pq).toFixed(4);
+
+        refresh_displays(gui);
+    });
+</script>
+</body>
+</html>
